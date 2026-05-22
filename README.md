@@ -57,12 +57,12 @@ const sellResult = await builder.createSellInstructions({
 ## Lower-level API
 
 ```ts
-const context = await builder.detectTradeContext("TOKEN_MINT_ADDRESS");
-const plan = await builder.planBuy({
-  mint: "TOKEN_MINT_ADDRESS",
-  quoteAmountIn: 100_000_000n,
-});
-const built = await builder.buildInstructions(plan, owner);
+const context = await builder.getTradeContext("TOKEN_MINT_ADDRESS");
+const marketInfo = await builder.getMarketInfo("TOKEN_MINT_ADDRESS");
+
+console.log(context.mode); // "bonding" | "amm"
+console.log(marketInfo.solAmount.toString());
+console.log(marketInfo.tokenAmount.toString());
 ```
 
 ## Notes
@@ -70,3 +70,4 @@ const built = await builder.buildInstructions(plan, owner);
 - `createBuyInstructions` and `createSellInstructions` may return multiple chunks when `maxAmountPerTx` is set
 - Each chunk is already ordered for execution
 - For AMM trades, setup and cleanup instructions are currently returned inline in `instructions`
+- `getMarketInfo()` returns the current mode plus pool/bonding SOL and token reserves

@@ -1,6 +1,6 @@
 {
   "name": "pump-trader-v2",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unsigned Pump trade instruction builder.",
   "type": "module",
   "main": "./dist/index.js",

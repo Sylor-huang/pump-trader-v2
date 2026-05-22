@@ -23,6 +23,6 @@ test("built package entry exports the main public API surface", async () => {
 
   assert.equal(typeof mod.PumpTradeInstructionBuilder, "function");
   assert.equal(typeof mod.detectTradeContext, "function");
-  assert.equal(typeof mod.createBuyPlan, "function");
-  assert.equal(typeof mod.createSellPlan, "function");
+  assert.equal(typeof mod.detectTokenProgramForMint, "function");
+  assert.equal(typeof mod.splitAmountByMax, "function");
 });

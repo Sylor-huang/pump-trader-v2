@@ -6,4 +6,5 @@ test("README documents createBuyInstructions and createSellInstructions", () => 
   const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
   assert.match(readme, /createBuyInstructions/);
   assert.match(readme, /createSellInstructions/);
+  assert.match(readme, /getMarketInfo/);
 });
