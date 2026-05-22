@@ -1,31 +1,7 @@
-import { createRequire } from "node:module";
-
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import type { Connection as ConnectionType, PublicKey, Signer, TransactionInstruction } from "@solana/web3.js";
 import { Connection, PublicKey as Web3PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
-
-const require = createRequire(import.meta.url);
-const pumpSdk = require("@pump-fun/pump-sdk") as typeof import("@pump-fun/pump-sdk");
-const pumpSwapSdk = require("@pump-fun/pump-swap-sdk") as typeof import("@pump-fun/pump-swap-sdk");
-
-const {
-  OnlinePumpSdk,
-  PumpSdk,
-  PUMP_SDK,
-  bondingCurvePda,
-  getBuyTokenAmountFromSolAmount,
-  getSellSolAmountFromTokenAmount,
-} = pumpSdk;
-
-const {
-  OnlinePumpAmmSdk,
-  PumpAmmSdk,
-  PUMP_AMM_SDK,
-  canonicalPumpPoolPda,
-  buyQuoteInput,
-  sellBaseInput,
-} = pumpSwapSdk;
 
 export const PROGRAM_IDS = Object.freeze({
   PUMP: new Web3PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"),
@@ -99,6 +75,84 @@ export interface MarketInfo {
   virtualSolAmount?: bigint;
 }
 
+interface AmmPoolLookupResult {
+  poolKey: PublicKey;
+  pool: import("@pump-fun/pump-swap-sdk").Pool | null;
+  quoteMint: PublicKey;
+}
+
+type PumpSdkRuntime = typeof import("@pump-fun/pump-sdk");
+type PumpSwapSdkRuntime = typeof import("@pump-fun/pump-swap-sdk");
+
+let pumpSdkRuntimePromise: Promise<PumpSdkRuntime> | undefined;
+let pumpSwapSdkRuntimePromise: Promise<PumpSwapSdkRuntime> | undefined;
+
+async function importFirstWorkingModule<T>(
+  label: string,
+  candidates: string[],
+  normalize: (mod: unknown) => T,
+  isValid: (mod: T) => boolean,
+): Promise<T> {
+  const failures: string[] = [];
+
+  for (const candidate of candidates) {
+    try {
+      const mod = await import(candidate);
+      const normalized = normalize(mod);
+
+      if (isValid(normalized)) {
+        return normalized;
+      }
+
+      failures.push(`${candidate}: module loaded but missing expected exports`);
+    } catch (error) {
+      failures.push(`${candidate}: ${(error as Error).message}`);
+    }
+  }
+
+  throw new Error(`Unable to load ${label}\n${failures.join("\n")}`);
+}
+
+function candidateUrls(path: string): string[] {
+  return [
+    path,
+    new URL(`../node_modules/${path}`, import.meta.url).href,
+    new URL(`../../${path}`, import.meta.url).href,
+  ];
+}
+
+async function loadPumpSdkRuntime(): Promise<PumpSdkRuntime> {
+  if (!pumpSdkRuntimePromise) {
+    pumpSdkRuntimePromise = importFirstWorkingModule<PumpSdkRuntime>(
+      "@pump-fun/pump-sdk",
+      candidateUrls("@pump-fun/pump-sdk"),
+      (mod) => {
+        const candidate = mod as { default?: unknown };
+        if (candidate.default && typeof candidate.default === "object") {
+          return candidate.default as PumpSdkRuntime;
+        }
+        return mod as PumpSdkRuntime;
+      },
+      (mod) => typeof mod.OnlinePumpSdk === "function" && typeof mod.PumpSdk === "function",
+    );
+  }
+
+  return pumpSdkRuntimePromise;
+}
+
+async function loadPumpSwapSdkRuntime(): Promise<PumpSwapSdkRuntime> {
+  if (!pumpSwapSdkRuntimePromise) {
+    pumpSwapSdkRuntimePromise = importFirstWorkingModule<PumpSwapSdkRuntime>(
+      "@pump-fun/pump-swap-sdk",
+      candidateUrls("@pump-fun/pump-swap-sdk"),
+      (mod) => mod as PumpSwapSdkRuntime,
+      (mod) => typeof mod.OnlinePumpAmmSdk === "function" && typeof mod.PumpAmmSdk === "function",
+    );
+  }
+
+  return pumpSwapSdkRuntimePromise;
+}
+
 function toPublicKey(value: AddressLike): PublicKey {
   return value instanceof Web3PublicKey ? value : new Web3PublicKey(value);
 }
@@ -109,6 +163,28 @@ function bigintToBn(value: bigint): BN {
 
 function bnToBigint(value: BN): bigint {
   return BigInt(value.toString());
+}
+
+function getEffectiveQuoteMint(quoteMint?: PublicKey): PublicKey {
+  if (!quoteMint || quoteMint.equals(Web3PublicKey.default)) {
+    return SOL_MINT;
+  }
+
+  return quoteMint;
+}
+
+async function resolveQuoteMint(
+  connection: Pick<ConnectionType, "getAccountInfo">,
+  quoteMint?: PublicKey,
+): Promise<PublicKey> {
+  const effectiveQuoteMint = getEffectiveQuoteMint(quoteMint);
+
+  if (effectiveQuoteMint.equals(SOL_MINT)) {
+    return SOL_MINT;
+  }
+
+  const quoteMintInfo = await connection.getAccountInfo(effectiveQuoteMint);
+  return quoteMintInfo ? effectiveQuoteMint : SOL_MINT;
 }
 
 export function splitAmountByMax(total: bigint, maxPerChunk: bigint): bigint[] {
@@ -170,6 +246,7 @@ async function loadBondingCurveState(
   connection: Pick<ConnectionType, "getAccountInfo">,
   mint: PublicKey,
 ) {
+  const { bondingCurvePda, PUMP_SDK } = await loadPumpSdkRuntime();
   const accountInfo = await connection.getAccountInfo(bondingCurvePda(mint));
   if (!accountInfo) {
     return null;
@@ -181,17 +258,45 @@ async function loadAmmPool(
   connection: Pick<ConnectionType, "getAccountInfo">,
   mint: PublicKey,
   quoteMint: PublicKey = SOL_MINT,
-) {
+): Promise<AmmPoolLookupResult> {
+  const { canonicalPumpPoolPda, PUMP_AMM_SDK } = await loadPumpSwapSdkRuntime();
   const poolKey = canonicalPumpPoolPda(mint, quoteMint);
   const accountInfo = await connection.getAccountInfo(poolKey);
   if (!accountInfo) {
-    return { poolKey, pool: null as import("@pump-fun/pump-swap-sdk").Pool | null };
+    return {
+      poolKey,
+      pool: null as import("@pump-fun/pump-swap-sdk").Pool | null,
+      quoteMint,
+    };
   }
 
   return {
     poolKey,
     pool: PUMP_AMM_SDK.decodePoolNullable(accountInfo),
+    quoteMint,
   };
+}
+
+async function loadAmmPoolWithFallback(
+  connection: Pick<ConnectionType, "getAccountInfo">,
+  mint: PublicKey,
+  quoteMint?: PublicKey,
+): Promise<AmmPoolLookupResult | null> {
+  const resolvedQuoteMint = await resolveQuoteMint(connection, quoteMint);
+  const attempts: PublicKey[] = [resolvedQuoteMint];
+
+  if (!resolvedQuoteMint.equals(SOL_MINT)) {
+    attempts.push(SOL_MINT);
+  }
+
+  for (const candidateQuoteMint of attempts) {
+    const result = await loadAmmPool(connection, mint, candidateQuoteMint);
+    if (result.pool) {
+      return result;
+    }
+  }
+
+  return null;
 }
 
 export async function detectTradeContext(args: {
@@ -207,21 +312,24 @@ export async function detectTradeContext(args: {
       mint,
       mode: "bonding",
       tokenProgram: tokenProgram.programId,
-      quoteMint: bondingCurve.quoteMint ?? SOL_MINT,
+      quoteMint: await resolveQuoteMint(args.connection, bondingCurve.quoteMint),
     };
   }
 
-  const quoteMint = bondingCurve?.quoteMint ?? SOL_MINT;
-  const { poolKey, pool } = await loadAmmPool(args.connection, mint, quoteMint);
+  const poolLookup = await loadAmmPoolWithFallback(args.connection, mint, bondingCurve?.quoteMint);
 
-  if (bondingCurve?.complete || pool) {
+  if (poolLookup) {
     return {
       mint,
       mode: "amm",
       tokenProgram: tokenProgram.programId,
-      quoteMint,
-      poolKey,
+      quoteMint: poolLookup.quoteMint,
+      poolKey: poolLookup.poolKey,
     };
+  }
+
+  if (bondingCurve?.complete) {
+    throw new Error(`Bonding curve is complete but AMM pool was not found for ${mint.toBase58()}`);
   }
 
   throw new Error(`Unable to determine Pump market for ${mint.toBase58()}`);
@@ -229,22 +337,45 @@ export async function detectTradeContext(args: {
 
 export class PumpTradeInstructionBuilder {
   private readonly connection: ConnectionType;
-  private readonly onlinePumpSdk: import("@pump-fun/pump-sdk").OnlinePumpSdk;
-  private readonly offlinePumpSdk: import("@pump-fun/pump-sdk").PumpSdk;
-  private readonly onlinePumpAmmSdk: import("@pump-fun/pump-swap-sdk").OnlinePumpAmmSdk;
-  private readonly offlinePumpAmmSdk: import("@pump-fun/pump-swap-sdk").PumpAmmSdk;
   private readonly options: PumpTradeInstructionBuilderOptions;
+  private pumpSdkClientsPromise:
+    | Promise<{ online: import("@pump-fun/pump-sdk").OnlinePumpSdk; offline: import("@pump-fun/pump-sdk").PumpSdk }>
+    | undefined;
+  private pumpAmmSdkClientsPromise:
+    | Promise<{
+        online: import("@pump-fun/pump-swap-sdk").OnlinePumpAmmSdk;
+        offline: import("@pump-fun/pump-swap-sdk").PumpAmmSdk;
+      }>
+    | undefined;
 
   constructor(connection: ConnectionType | string, options: PumpTradeInstructionBuilderOptions = {}) {
     this.connection =
       typeof connection === "string"
         ? new Connection(connection, options.commitment ?? "confirmed")
         : connection;
-    this.onlinePumpSdk = new OnlinePumpSdk(this.connection);
-    this.offlinePumpSdk = new PumpSdk();
-    this.onlinePumpAmmSdk = new OnlinePumpAmmSdk(this.connection);
-    this.offlinePumpAmmSdk = new PumpAmmSdk();
     this.options = options;
+  }
+
+  private async getPumpSdkClients() {
+    if (!this.pumpSdkClientsPromise) {
+      this.pumpSdkClientsPromise = loadPumpSdkRuntime().then(({ OnlinePumpSdk, PumpSdk }) => ({
+        online: new OnlinePumpSdk(this.connection),
+        offline: new PumpSdk(),
+      }));
+    }
+
+    return this.pumpSdkClientsPromise;
+  }
+
+  private async getPumpAmmSdkClients() {
+    if (!this.pumpAmmSdkClientsPromise) {
+      this.pumpAmmSdkClientsPromise = loadPumpSwapSdkRuntime().then(({ OnlinePumpAmmSdk, PumpAmmSdk }) => ({
+        online: new OnlinePumpAmmSdk(this.connection),
+        offline: new PumpAmmSdk(),
+      }));
+    }
+
+    return this.pumpAmmSdkClientsPromise;
   }
 
   async getTradeContext(mint: AddressLike): Promise<TradeContext> {
@@ -275,10 +406,11 @@ export class PumpTradeInstructionBuilder {
       };
     }
 
-    const { pool } = await loadAmmPool(this.connection, context.mint, context.quoteMint);
-    if (!pool) {
+    const poolLookup = await loadAmmPoolWithFallback(this.connection, context.mint, context.quoteMint);
+    if (!poolLookup?.pool) {
       throw new Error(`AMM pool not found for ${context.mint.toBase58()}`);
     }
+    const { pool, quoteMint, poolKey } = poolLookup;
 
     const [baseBalance, quoteBalance] = await Promise.all([
       this.connection.getTokenAccountBalance(pool.poolBaseTokenAccount),
@@ -289,8 +421,8 @@ export class PumpTradeInstructionBuilder {
       mint: context.mint,
       mode: "amm",
       tokenProgram: context.tokenProgram,
-      quoteMint: context.quoteMint,
-      poolKey: context.poolKey,
+      quoteMint,
+      poolKey,
       tokenAmount: BigInt(baseBalance.value.amount),
       solAmount: BigInt(quoteBalance.value.amount),
     };
@@ -302,11 +434,14 @@ export class PumpTradeInstructionBuilder {
     const slippageBps = request.slippageBps ?? this.options.defaultSlippageBps ?? DEFAULT_SLIPPAGE_BPS;
     const maxAmountPerTx = request.maxAmountPerTx ?? this.options.defaultMaxAmountPerTx ?? request.quoteAmountIn;
     const chunks = splitAmountByMax(request.quoteAmountIn, maxAmountPerTx);
+    const { getBuyTokenAmountFromSolAmount } = await loadPumpSdkRuntime();
+    const { buyQuoteInput } = await loadPumpSwapSdkRuntime();
 
     if (context.mode === "bonding") {
-      const global = await this.onlinePumpSdk.fetchGlobal();
-      const feeConfig = await this.onlinePumpSdk.fetchFeeConfig();
-      const buyState = await this.onlinePumpSdk.fetchBuyState(context.mint, owner, context.tokenProgram);
+      const { online: onlinePumpSdk, offline: offlinePumpSdk } = await this.getPumpSdkClients();
+      const global = await onlinePumpSdk.fetchGlobal();
+      const feeConfig = await onlinePumpSdk.fetchFeeConfig();
+      const buyState = await onlinePumpSdk.fetchBuyState(context.mint, owner, context.tokenProgram);
       const bondingCurve = await loadBondingCurveState(this.connection, context.mint);
 
       if (!bondingCurve) {
@@ -329,7 +464,7 @@ export class PumpTradeInstructionBuilder {
             );
 
             return {
-              instructions: await this.offlinePumpSdk.buyInstructions({
+              instructions: await offlinePumpSdk.buyInstructions({
                 global,
                 ...buyState,
                 mint: context.mint,
@@ -349,12 +484,13 @@ export class PumpTradeInstructionBuilder {
       };
     }
 
-    const swapState = await this.onlinePumpAmmSdk.swapSolanaState(context.poolKey!, owner);
+    const { online: onlinePumpAmmSdk, offline: offlinePumpAmmSdk } = await this.getPumpAmmSdkClients();
+    const swapState = await onlinePumpAmmSdk.swapSolanaState(context.poolKey!, owner);
     return {
       mode: "amm",
       chunks: await Promise.all(
         chunks.map(async (quoteAmountIn) => ({
-          instructions: await this.offlinePumpAmmSdk.buyQuoteInput(
+          instructions: await offlinePumpAmmSdk.buyQuoteInput(
             swapState,
             bigintToBn(quoteAmountIn),
             slippageBps / 100,
@@ -387,11 +523,14 @@ export class PumpTradeInstructionBuilder {
     const slippageBps = request.slippageBps ?? this.options.defaultSlippageBps ?? DEFAULT_SLIPPAGE_BPS;
     const maxAmountPerTx = request.maxAmountPerTx ?? this.options.defaultMaxAmountPerTx ?? request.tokenAmountIn;
     const chunks = splitAmountByMax(request.tokenAmountIn, maxAmountPerTx);
+    const { getSellSolAmountFromTokenAmount } = await loadPumpSdkRuntime();
+    const { sellBaseInput } = await loadPumpSwapSdkRuntime();
 
     if (context.mode === "bonding") {
-      const global = await this.onlinePumpSdk.fetchGlobal();
-      const feeConfig = await this.onlinePumpSdk.fetchFeeConfig();
-      const sellState = await this.onlinePumpSdk.fetchSellState(context.mint, owner, context.tokenProgram);
+      const { online: onlinePumpSdk, offline: offlinePumpSdk } = await this.getPumpSdkClients();
+      const global = await onlinePumpSdk.fetchGlobal();
+      const feeConfig = await onlinePumpSdk.fetchFeeConfig();
+      const sellState = await onlinePumpSdk.fetchSellState(context.mint, owner, context.tokenProgram);
       const bondingCurve = await loadBondingCurveState(this.connection, context.mint);
 
       if (!bondingCurve) {
@@ -413,7 +552,7 @@ export class PumpTradeInstructionBuilder {
             );
 
             return {
-              instructions: await this.offlinePumpSdk.sellInstructions({
+              instructions: await offlinePumpSdk.sellInstructions({
                 global,
                 ...sellState,
                 mint: context.mint,
@@ -435,12 +574,13 @@ export class PumpTradeInstructionBuilder {
       };
     }
 
-    const swapState = await this.onlinePumpAmmSdk.swapSolanaState(context.poolKey!, owner);
+    const { online: onlinePumpAmmSdk, offline: offlinePumpAmmSdk } = await this.getPumpAmmSdkClients();
+    const swapState = await onlinePumpAmmSdk.swapSolanaState(context.poolKey!, owner);
     return {
       mode: "amm",
       chunks: await Promise.all(
         chunks.map(async (tokenAmountIn) => ({
-          instructions: await this.offlinePumpAmmSdk.sellBaseInput(
+          instructions: await offlinePumpAmmSdk.sellBaseInput(
             swapState,
             bigintToBn(tokenAmountIn),
             slippageBps / 100,

@@ -25,13 +25,12 @@ npm install
 ## Usage
 
 ```ts
-import { Connection, Keypair, Transaction } from "@solana/web3.js";
+import { Keypair, Transaction } from "@solana/web3.js";
 import { PumpTradeInstructionBuilder } from "pump-trader-v2";
 
-const connection = new Connection("https://api.mainnet-beta.solana.com", "confirmed");
 const owner = Keypair.generate().publicKey;
 
-const builder = new PumpTradeInstructionBuilder(connection, {
+const builder = new PumpTradeInstructionBuilder("https://api.mainnet-beta.solana.com", {
   defaultSlippageBps: 500,
 });
 
@@ -71,3 +70,76 @@ console.log(marketInfo.tokenAmount.toString());
 - Each chunk is already ordered for execution
 - For AMM trades, setup and cleanup instructions are currently returned inline in `instructions`
 - `getMarketInfo()` returns the current mode plus pool/bonding SOL and token reserves
+- `PumpTradeInstructionBuilder` accepts either a `Connection` instance or an RPC string
+
+## Quick market test
+
+```bash
+RPC_URL=https://api.mainnet-beta.solana.com \
+MINT=TOKEN_MINT_ADDRESS \
+npm run example:market
+```
+
+Or:
+
+```bash
+npm run example:market -- https://api.mainnet-beta.solana.com TOKEN_MINT_ADDRESS
+```
+
+This will print:
+
+```json
+{
+  "mint": "...",
+  "mode": "bonding",
+  "tokenAmount": "...",
+  "solAmount": "...",
+  "virtualTokenAmount": "...",
+  "virtualSolAmount": "..."
+}
+```
+
+## Example scripts
+
+Use these to isolate where a failure happens:
+
+```bash
+# 1. Only detect bonding / amm
+npm run example:context -- <rpc> <mint>
+
+# 2. Query market reserves
+npm run example:market -- <rpc> <mint>
+
+# 3. Diagnose context + market lookup
+npm run example:diagnose -- <rpc> <mint>
+
+# 4. Build buy instructions
+npm run example:buy -- <rpc> <mint> <owner> <lamports> [slippageBps] [maxAmountPerTx]
+
+# 5. Build sell instructions
+npm run example:sell -- <rpc> <mint> <owner> <tokenBaseUnits> [slippageBps] [maxAmountPerTx]
+```
+
+All example scripts also support environment variables:
+
+```bash
+RPC_URL=... MINT=... OWNER=... AMOUNT=... npm run example:buy
+```
+
+The buy/sell examples print per-chunk diagnostics only:
+
+```json
+{
+  "mode": "amm",
+  "chunks": [
+    {
+      "index": 0,
+      "instructionCount": 3,
+      "cleanupInstructionCount": 0,
+      "signerCount": 0,
+      "inputAmount": "100000000",
+      "expectedOutputAmount": "123456789"
+    }
+  ]
+}
+```

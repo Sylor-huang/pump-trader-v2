@@ -1,12 +1,13 @@
 {
   "name": "pump-trader-v2",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Unsigned Pump trade instruction builder.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "examples"
   ],
   "exports": {
     ".": {
@@ -18,7 +19,12 @@
     "build": "tsc",
     "pretest": "npm run build",
     "prepack": "npm run build",
-    "test": "node --test --import tsx tests/**/*.test.ts"
+    "example:context": "npm run build && node --import tsx examples/get-trade-context.ts",
+    "example:diagnose": "npm run build && node --import tsx examples/diagnose-market.ts",
+    "example:market": "npm run build && node --import tsx examples/get-market-info.ts",
+    "example:buy": "npm run build && node --import tsx examples/build-buy.ts",
+    "example:sell": "npm run build && node --import tsx examples/build-sell.ts",
+    "test": "node --test --import tsx"
   },
   "devDependencies": {
     "tsx": "^4.20.6",
