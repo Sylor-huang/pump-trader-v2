@@ -1,8 +1,8 @@
 import { createRequire } from "node:module";
 
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
-import type { Connection, PublicKey, Signer, TransactionInstruction } from "@solana/web3.js";
-import { PublicKey as Web3PublicKey } from "@solana/web3.js";
+import type { Connection as ConnectionType, PublicKey, Signer, TransactionInstruction } from "@solana/web3.js";
+import { Connection, PublicKey as Web3PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
 
 const require = createRequire(import.meta.url);
@@ -47,6 +47,7 @@ export interface TokenProgramInfo {
 export interface PumpTradeInstructionBuilderOptions {
   defaultSlippageBps?: number;
   defaultMaxAmountPerTx?: bigint;
+  commitment?: ConstructorParameters<typeof Connection>[1];
 }
 
 export interface CommonTradeRequest {
@@ -145,7 +146,7 @@ export function applySlippageBps(
 }
 
 export async function detectTokenProgramForMint(
-  connection: Pick<Connection, "getAccountInfo">,
+  connection: Pick<ConnectionType, "getAccountInfo">,
   mint: PublicKey,
 ): Promise<TokenProgramInfo> {
   const accountInfo = await connection.getAccountInfo(mint);
@@ -166,7 +167,7 @@ export async function detectTokenProgramForMint(
 }
 
 async function loadBondingCurveState(
-  connection: Pick<Connection, "getAccountInfo">,
+  connection: Pick<ConnectionType, "getAccountInfo">,
   mint: PublicKey,
 ) {
   const accountInfo = await connection.getAccountInfo(bondingCurvePda(mint));
@@ -177,7 +178,7 @@ async function loadBondingCurveState(
 }
 
 async function loadAmmPool(
-  connection: Pick<Connection, "getAccountInfo">,
+  connection: Pick<ConnectionType, "getAccountInfo">,
   mint: PublicKey,
   quoteMint: PublicKey = SOL_MINT,
 ) {
@@ -194,7 +195,7 @@ async function loadAmmPool(
 }
 
 export async function detectTradeContext(args: {
-  connection: Pick<Connection, "getAccountInfo">;
+  connection: Pick<ConnectionType, "getAccountInfo">;
   mint: AddressLike;
 }): Promise<TradeContext> {
   const mint = toPublicKey(args.mint);
@@ -227,18 +228,21 @@ export async function detectTradeContext(args: {
 }
 
 export class PumpTradeInstructionBuilder {
-  private readonly connection: Connection;
+  private readonly connection: ConnectionType;
   private readonly onlinePumpSdk: import("@pump-fun/pump-sdk").OnlinePumpSdk;
   private readonly offlinePumpSdk: import("@pump-fun/pump-sdk").PumpSdk;
   private readonly onlinePumpAmmSdk: import("@pump-fun/pump-swap-sdk").OnlinePumpAmmSdk;
   private readonly offlinePumpAmmSdk: import("@pump-fun/pump-swap-sdk").PumpAmmSdk;
   private readonly options: PumpTradeInstructionBuilderOptions;
 
-  constructor(connection: Connection, options: PumpTradeInstructionBuilderOptions = {}) {
-    this.connection = connection;
-    this.onlinePumpSdk = new OnlinePumpSdk(connection);
+  constructor(connection: ConnectionType | string, options: PumpTradeInstructionBuilderOptions = {}) {
+    this.connection =
+      typeof connection === "string"
+        ? new Connection(connection, options.commitment ?? "confirmed")
+        : connection;
+    this.onlinePumpSdk = new OnlinePumpSdk(this.connection);
     this.offlinePumpSdk = new PumpSdk();
-    this.onlinePumpAmmSdk = new OnlinePumpAmmSdk(connection);
+    this.onlinePumpAmmSdk = new OnlinePumpAmmSdk(this.connection);
     this.offlinePumpAmmSdk = new PumpAmmSdk();
     this.options = options;
   }
